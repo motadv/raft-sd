@@ -36,6 +36,24 @@ const (
 	Candidate
 )
 
+// AppendEntry
+
+type AppendEntriesArgs struct {
+	Term int // Leader's term number
+
+	//* Variaveis inuteis se não for trabalhar com logs (Não necessário para o 2A aparentemente)
+	LeaderID int // Leader's peer ID
+	// PrevLogIndex int // Index of new log's first entry
+	// PrevLogTerm  int // Term no. of PrevLogIndex entry
+	// // Entries []*LogEntry // New entries coming from leader (empty for heartbeat messages)
+	// LeaderCommit int // Leader's committ index
+}
+
+type AppendEntriesReply struct {
+	Term    int  // Peer's term number for leader to update itself
+	Success bool // True if peer successfully stored new entries
+}
+
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
 // tester) on the same server, via the applyCh passed to Make().
@@ -75,7 +93,7 @@ type Raft struct {
 	maxTime         int
 	minTime         int
 	timeoutDuration time.Duration
-	heartbeatCh     chan interface{}
+	heartbeatCh     chan AppendEntriesArgs
 }
 
 type stateLog struct {
@@ -143,26 +161,31 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 
+	// rf - eleitor || args - candidate
+
 	// Example logic:
 	// 1. Check if the candidate's term is greater than the current term.
 	newerTerm := false
 	if args.Term > rf.currentTerm {
 		newerTerm = true
+		rf.currentTerm = args.Term
+		rf.votedFor = -1
+		rf.role = Follower
 	}
 
 	// 2. Determine if the candidate's log is up-to-date.
 	//    Compare the last log term and index with the local log.
-	upToDate := false
-	if args.LastLogTerm > rf.logArray[len(rf.logArray)-1].LogTerm || (args.LastLogTerm == rf.logArray[len(rf.logArray)-1].LogTerm && args.LastLogIndex >= rf.logArray[len(rf.logArray)-1].LogIndex) {
-		upToDate = true
-	}
+	// upToDate := false
+	// if args.LastLogTerm > rf.logArray[len(rf.logArray)-1].LogTerm || (args.LastLogTerm == rf.logArray[len(rf.logArray)-1].LogTerm && args.LastLogIndex >= rf.logArray[len(rf.logArray)-1].LogIndex) {
+	// 	upToDate = true
+	// }
 
 	// 3. Check if the server has already voted for another candidate in this term.
 	//    If it has, deny the vote.
-	alreadyVoted := rf.votedFor != -1 && rf.votedFor != args.CandidateID
+	hasntVoted := rf.votedFor == -1
 	// 4. Grant the vote to the candidate if all conditions are met.
 
-	if newerTerm && upToDate && !alreadyVoted {
+	if newerTerm && hasntVoted {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateID
 		// rf.resetElectionTimer()
@@ -172,6 +195,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	// Fill the reply struct with the appropriate values.
 	reply.Term = rf.currentTerm
+
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -202,39 +226,30 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+	fmt.Printf("Follower %d has been asked for a vote from %d. \n", server, rf.me)
+
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 
-	if ok {
+	rf.mu.Lock()
+	if ok && rf.role == Candidate {
 		if reply.VoteGranted {
 			rf.votesReceived += 1
 		}
 
 		if rf.votesReceived > (len(rf.peers) / 2) {
+			fmt.Printf("Server %d got a vote from %d \n", rf.me, server)
+			fmt.Printf("Server %d he now has %d votes out of 3 \n", rf.me, rf.votesReceived)
+			fmt.Printf("Server %d IS NOW A LEADER. ALL YOUR BASES ARE BELONG TO US::: %d \n", rf.me, rf.currentTerm)
 			rf.role = Leader
-			//Send heartbeat??
+			rf.votedFor = -1
+			rf.votesReceived = 0
+			rf.leaderIndex = rf.me
+
 			go rf.startHearbeatRoutine()
 		}
 	}
-
+	rf.mu.Unlock()
 	return ok
-}
-
-// AppendEntry
-
-type AppendEntriesArgs struct {
-	Term int // Leader's term number
-
-	//* Variaveis inuteis se não for trabalhar com logs (Não necessário para o 2A aparentemente)
-	// LeaderID     int // Leader's peer ID
-	// PrevLogIndex int // Index of new log's first entry
-	// PrevLogTerm  int // Term no. of PrevLogIndex entry
-	// // Entries []*LogEntry // New entries coming from leader (empty for heartbeat messages)
-	// LeaderCommit int // Leader's committ index
-}
-
-type AppendEntriesReply struct {
-	Term    int  // Peer's term number for leader to update itself
-	Success bool // True if peer successfully stored new entries
 }
 
 func (rf *Raft) AppendEntry(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -244,39 +259,61 @@ func (rf *Raft) AppendEntry(args *AppendEntriesArgs, reply *AppendEntriesReply) 
 	msg := *args
 	rf.heartbeatCh <- msg
 
+	reply.Success = true
+
+	fmt.Printf(" -- Server [%d/T%d] Leader [%d/T%d] \n", rf.me, rf.currentTerm, args.LeaderID, args.Term)
+
+	rf.mu.Lock()
+	if rf.currentTerm < args.Term {
+		rf.currentTerm = args.Term
+		// fmt.Printf("Server %d [%d] should have stepped down in place of %d [%d]. \n", rf.me, rf.currentTerm, args.LeaderID, args.Term)
+		rf.role = Follower
+	}
+	rf.mu.Unlock()
+
 	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
 		reply.Success = false
 	}
+
+	if reply.Success {
+		fmt.Printf("Server %d has received a message from %d. \n", rf.me, args.LeaderID)
+	} else {
+		fmt.Printf("%d has sent a failed message. \n", args.LeaderID)
+	}
+
 }
 
 func (rf *Raft) startHearbeatRoutine() {
 	for {
 		if rf.role != Leader {
+
 			return
 		}
 
 		hbArgs := AppendEntriesArgs{}
 		hbArgs.Term = rf.currentTerm
-		//TODO Adicionar outros argumentos se forem relevantes
+		hbArgs.LeaderID = rf.me
 
 		//Broadcast heartbeat para todos os servidores
 		for id := 0; id < len(rf.peers); id++ {
+
 			if id == rf.me {
+
 				continue
 			}
+
 			hbReply := AppendEntriesReply{}
 
 			go func(id int) {
-				ok := rf.peers[id].Call("Raft.AppendEntries", &hbArgs, &hbReply)
+				ok := rf.peers[id].Call("Raft.AppendEntry", &hbArgs, &hbReply)
 
 				if ok {
 
 					if !hbReply.Success {
-						//TODO lock do mutex?
-						//rf.mu.Lock()
+
 						rf.role = Follower
-						//rf.mu.Unlock()
+
 					}
 				}
 			}(id)
@@ -317,7 +354,9 @@ func (rf *Raft) Kill() {
 }
 
 func (rf *Raft) startElection() {
+
 	rf.role = Candidate
+	fmt.Printf("Follower %d is trying to become a candidate. \n", rf.me)
 	//Current term increments on start of election
 	rf.currentTerm = rf.currentTerm + 1
 	rf.votedFor = rf.me
@@ -335,12 +374,11 @@ func (rf *Raft) startElection() {
 		if id == rf.me {
 			continue
 		}
-
+		fmt.Printf("Follower %d is trying to ask vote for %d. \n", rf.me, id)
 		requestVotesReply := RequestVoteReply{}
 
 		go rf.sendRequestVote(id, &requestVotesArgs, &requestVotesReply)
 	}
-
 }
 
 func (rf *Raft) listenHearbeat() {
@@ -348,28 +386,34 @@ func (rf *Raft) listenHearbeat() {
 	timeoutTimer := time.NewTimer(rf.timeoutDuration)
 
 	for {
-
 		select {
 		case hb := <-rf.heartbeatCh:
+
+			if rf.role == Candidate {
+				fmt.Printf("Follower %d has stepped down from candidature. \n", rf.me)
+
+				rf.role = Follower
+				rf.votedFor = -1
+				rf.votesReceived = 0
+				rf.leaderIndex = hb.LeaderID
+			}
 			// Received heartbeat
-			//TODO Lidar com o hb recebido (ou mensagem em geral na real, mas a gente n tem essas)
 			// Reset election timeout
 			timeoutTimer.Reset(rf.timeoutDuration)
+			rf.timeoutDuration = time.Duration(rand.Intn(rf.maxTime-rf.minTime+1)+rf.minTime) * time.Millisecond
+
 		case <-timeoutTimer.C:
+
 			if rf.role != Leader { // Election timeout elapsed, trigger election
 				fmt.Printf("Follower %d has timeout'ed, send help. \n", rf.me)
 				// server int, args *RequestVoteArgs, reply *RequestVoteReply
 
-				rf.votesReceived = 0
-				rf.votedFor = -1
-
 				rf.startElection()
 				timeoutTimer.Reset(rf.timeoutDuration)
+				rf.timeoutDuration = time.Duration(rand.Intn(rf.maxTime-rf.minTime+1)+rf.minTime) * time.Millisecond
+
 			}
 		}
-
-		rf.timeoutDuration = time.Duration(rand.Intn(rf.maxTime-rf.minTime+1)+rf.minTime) * time.Millisecond
-
 	}
 }
 
@@ -384,6 +428,7 @@ func (rf *Raft) listenHearbeat() {
 // for any long-running work.
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
+
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
@@ -400,11 +445,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.minTime = 250
 	rf.maxTime = 400
 	rf.timeoutDuration = time.Duration(rand.Intn(rf.maxTime-rf.minTime+1)+rf.minTime) * time.Millisecond
-	// rf.timeoutDuration = time.Duration(2) * time.Second
 
 	rf.role = Follower
 
-	rf.heartbeatCh = make(chan interface{})
+	rf.heartbeatCh = make(chan AppendEntriesArgs)
 
 	go rf.listenHearbeat()
 	// initialize from state persisted before a crash
