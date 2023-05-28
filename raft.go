@@ -160,6 +160,17 @@ type RequestVoteReply struct {
 }
 
 // example RequestVote RPC handler.
+
+// RequestVote(candidateArgs, reply) -
+//
+//	candidateArgs:	informação do candidato emissor
+//	reply:			resposta do eleitor, concedendo ou não o voto
+//
+//		Avalia se o candidato é válido para receber um novo voto originário do receptor,
+//	escrevendo na resposta seu termo e se o voto foi concedido. Caso o candidato possua
+//	um termo maior ou igual, receptor atualiza seu termo e reseta para estado follower caso necessário.
+//	Caso não tenha votado ainda, estabelece-o como candidato. Caso as duas condições sejam atendidas,
+//	garante seu voto ao candidato.
 func (rf *Raft) RequestVote(candidateArgs *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 
@@ -192,7 +203,7 @@ func (rf *Raft) RequestVote(candidateArgs *RequestVoteArgs, reply *RequestVoteRe
 	if newerTerm && hasntVoted {
 		reply.VoteGranted = true
 		rf.votedFor = candidateArgs.CandidateID
-		// rf.resetElectionTimer()
+
 	} else {
 		reply.VoteGranted = false
 	}
@@ -230,6 +241,18 @@ func (rf *Raft) RequestVote(candidateArgs *RequestVoteArgs, reply *RequestVoteRe
 // capitalized all field names in structs passed over RPC, and
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
+
+// sendRequestVote(server, args, reply) -
+//
+//	server:	índice do servidor alvo da requisição
+//	args:	informação do candidato emissor
+//	reply:	resposta do eleitor, concedendo ou não seu voto
+//
+//		Candidato requisita ao componente alvo que avalie a votação sobre ele. Impulsiona
+//	a chamada do método "RequestVote" pelo eleitor e espera pela resposta. Caso o eleitor aceite,
+//	incrementa a quantidade de eleitores que possui. Caso receba a maioria dos eleitores do sistema,
+//	altera estado para Leader e inicia a rotina de heartbeat para todos os componentes do sistema,
+//	finalizando então a eleição com sucesso.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
@@ -262,6 +285,15 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
+// AppendEntry(args, reply) -
+//
+//	args:	informações do líder emissor
+//	reply:	resposta fornecida pelo componente receptor, validando o emissor como líder ou não
+//
+//		Comunicação realizada entre o líder e os componentes do sistema. Aciona a leitura
+//	de heartbeat do componente receptor e avalia se o líder emissor ainda é válido para a conjuntura
+//	do sistema, informando-o se deve retornar ou não ao estado de Follower. Além disso, avalia a
+//	validade do próprio receptor, retornando-o ao estado de Follower caso seja o necessário.
 func (rf *Raft) AppendEntry(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.heartbeatCh <- args
 
@@ -297,6 +329,12 @@ func (rf *Raft) AppendEntry(args *AppendEntriesArgs, reply *AppendEntriesReply) 
 
 }
 
+// startHeartbeatRoutine() -
+//
+//		Inicializa a rotina de heartbeat de um líder quando eleito. Permanece em execução
+//	enquanto o componente for líder, informando os outros componentes de sua atividade e
+//	evitando que novas eleições sejam inicializadas. Impulsiona a chamada do método
+//	"AppendyEntry" pelo componente alvo a apartir de uma comunicação RPC, avaliando sua validade como líder.
 func (rf *Raft) startHearbeatRoutine() {
 	for {
 		if rf.role != Leader || !rf.isAlive {
@@ -369,6 +407,12 @@ func (rf *Raft) Kill() {
 	rf.isAlive = false
 }
 
+// startElection() -
+//
+//		Inicializa o processo de eleição. O componente requisitor se torna candidato, enviando
+//	uma requisição para todos os componentes do sistema e informando suas características, necessárias
+//	para a aceitação ou recusa do eleitor. Um mutex lock é implementado para evitar discordância de acesso
+//	durante o processamento de múltiplos candidatos.
 func (rf *Raft) startElection() {
 
 	rf.mu.Lock()
@@ -410,6 +454,11 @@ func (rf *Raft) startElection() {
 	rf.mu.Unlock()
 }
 
+// listenHeartBeat() -
+//
+//		Gerencia de forma assíncrona a escuta de heartbeat de todos os componentes do sistema,
+//	implementando comportamento específico para os candidatos. Caso o contador de um follower
+//	ou Candidate esgote, sinaliza o início de uma eleição com o seu termo incrementado e suas variaveis resetadas.
 func (rf *Raft) listenHearbeat() {
 
 	timeoutTimer := time.NewTimer(rf.timeoutDuration)
@@ -462,6 +511,14 @@ func (rf *Raft) listenHearbeat() {
 // tester or service expects Raft to send ApplyMsg messages.
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
+
+// Make() -
+//
+//		Inicia um novo compoenente do sistema em estado de Follower, especificando os
+//	valores iniciais para cada variável necessitada pela implementação do algoritmo.
+//	Inicia a contagem de election timeout de cada um desses componentes com a função
+//	listenHeartbeat(), aplicando um valor aleatório entre 250ms e 400ms, de acordo
+//	com o enunciado do trabalho.
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 
