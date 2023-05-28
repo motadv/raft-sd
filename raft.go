@@ -93,7 +93,9 @@ type Raft struct {
 	maxTime         int
 	minTime         int
 	timeoutDuration time.Duration
-	heartbeatCh     chan AppendEntriesArgs
+	heartbeatCh     chan *AppendEntriesArgs
+
+	debugId float64
 }
 
 type stateLog struct {
@@ -158,17 +160,19 @@ type RequestVoteReply struct {
 }
 
 // example RequestVote RPC handler.
-func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+func (rf *Raft) RequestVote(candidateArgs *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+
+	rf.mu.Lock()
 
 	// rf - eleitor || args - candidate
 
 	// Example logic:
 	// 1. Check if the candidate's term is greater than the current term.
 	newerTerm := false
-	if args.Term > rf.currentTerm {
+	if candidateArgs.Term >= rf.currentTerm {
 		newerTerm = true
-		rf.currentTerm = args.Term
+		rf.currentTerm = candidateArgs.Term
 		rf.votedFor = -1
 		rf.role = Follower
 	}
@@ -187,7 +191,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	if newerTerm && hasntVoted {
 		reply.VoteGranted = true
-		rf.votedFor = args.CandidateID
+		rf.votedFor = candidateArgs.CandidateID
 		// rf.resetElectionTimer()
 	} else {
 		reply.VoteGranted = false
@@ -196,6 +200,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Fill the reply struct with the appropriate values.
 	reply.Term = rf.currentTerm
 
+	rf.mu.Unlock()
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -226,7 +231,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	fmt.Printf("Follower %d has been asked for a vote from %d. \n", server, rf.me)
 
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 
@@ -237,9 +241,15 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 		}
 
 		if rf.votesReceived > (len(rf.peers) / 2) {
-			fmt.Printf("Server %d got a vote from %d \n", rf.me, server)
-			fmt.Printf("Server %d he now has %d votes out of 3 \n", rf.me, rf.votesReceived)
-			fmt.Printf("Server %d IS NOW A LEADER. ALL YOUR BASES ARE BELONG TO US::: %d \n", rf.me, rf.currentTerm)
+			if rf.isAlive {
+				fmt.Printf("Server %d got a vote from %d \n", rf.me, server)
+			}
+			if rf.isAlive {
+				fmt.Printf("Server %d he now has %d votes out of 3 \n", rf.me, rf.votesReceived)
+			}
+			if rf.isAlive {
+				fmt.Printf("Server %d IS NOW A LEADER. ALL YOUR BASES ARE BELONG TO US | Term %d \n", rf.me, rf.currentTerm)
+			}
 			rf.role = Leader
 			rf.votedFor = -1
 			rf.votesReceived = 0
@@ -253,23 +263,20 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 }
 
 func (rf *Raft) AppendEntry(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	//TODO criar append entry que será chamado pelo recebidor para adicionar a mensagem ao canal
-
-	//!Criando uma copia do args pq sei la são 1:20 da manhã se puder enviar direto o args como ponteiro muda depois
-	msg := *args
-	rf.heartbeatCh <- msg
-
-	reply.Success = true
-
-	fmt.Printf(" -- Server [%d/T%d] Leader [%d/T%d] \n", rf.me, rf.currentTerm, args.LeaderID, args.Term)
+	rf.heartbeatCh <- args
 
 	rf.mu.Lock()
-	if rf.currentTerm < args.Term {
-		rf.currentTerm = args.Term
-		// fmt.Printf("Server %d [%d] should have stepped down in place of %d [%d]. \n", rf.me, rf.currentTerm, args.LeaderID, args.Term)
-		rf.role = Follower
+
+	if rf.isAlive {
+		fmt.Printf("	Server [%d/T%d] <-- Leader [%d/T%d] \n", rf.me, rf.currentTerm, args.LeaderID, args.Term)
 	}
-	rf.mu.Unlock()
+	reply.Success = true
+
+	if args.Term >= rf.currentTerm {
+		rf.role = Follower
+		rf.currentTerm = args.Term
+		// if (rf.isAlive) { fmt.Printf("Server %d [%d] should have stepped down in place of %d [%d]. \n", rf.me, rf.currentTerm, args.LeaderID, args.Term)
+	}
 
 	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
@@ -277,16 +284,22 @@ func (rf *Raft) AppendEntry(args *AppendEntriesArgs, reply *AppendEntriesReply) 
 	}
 
 	if reply.Success {
-		fmt.Printf("Server %d has received a message from %d. \n", rf.me, args.LeaderID)
+		if rf.isAlive {
+			fmt.Printf("		Server %d has received a message from %d. \n", rf.me, args.LeaderID)
+		}
 	} else {
-		fmt.Printf("%d has sent a failed message. \n", args.LeaderID)
+		if rf.isAlive {
+			fmt.Printf("%d has sent a failed message. \n", args.LeaderID)
+		}
 	}
+
+	rf.mu.Unlock()
 
 }
 
 func (rf *Raft) startHearbeatRoutine() {
 	for {
-		if rf.role != Leader {
+		if rf.role != Leader || !rf.isAlive {
 
 			return
 		}
@@ -294,6 +307,8 @@ func (rf *Raft) startHearbeatRoutine() {
 		hbArgs := AppendEntriesArgs{}
 		hbArgs.Term = rf.currentTerm
 		hbArgs.LeaderID = rf.me
+
+		fmt.Printf("PID %f\n", rf.debugId)
 
 		//Broadcast heartbeat para todos os servidores
 		for id := 0; id < len(rf.peers); id++ {
@@ -351,16 +366,26 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // turn off debug output from this instance.
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
+	rf.isAlive = false
 }
 
 func (rf *Raft) startElection() {
 
+	rf.mu.Lock()
+
+	if rf.isAlive {
+		fmt.Printf("Server %d current term before election %d. \n", rf.me, rf.currentTerm)
+	}
+
 	rf.role = Candidate
-	fmt.Printf("Follower %d is trying to become a candidate. \n", rf.me)
 	//Current term increments on start of election
 	rf.currentTerm = rf.currentTerm + 1
 	rf.votedFor = rf.me
 	rf.votesReceived = 1
+
+	if rf.isAlive {
+		fmt.Printf("Follower %d is trying to become a candidate of term %d. \n", rf.me, rf.currentTerm)
+	}
 
 	requestVotesArgs := RequestVoteArgs{
 		Term:         rf.currentTerm,
@@ -374,11 +399,15 @@ func (rf *Raft) startElection() {
 		if id == rf.me {
 			continue
 		}
-		fmt.Printf("Follower %d is trying to ask vote for %d. \n", rf.me, id)
+		if rf.isAlive {
+			fmt.Printf("Follower %d is trying to ask vote for %d. \n", rf.me, id)
+		}
 		requestVotesReply := RequestVoteReply{}
 
 		go rf.sendRequestVote(id, &requestVotesArgs, &requestVotesReply)
 	}
+
+	rf.mu.Unlock()
 }
 
 func (rf *Raft) listenHearbeat() {
@@ -386,11 +415,16 @@ func (rf *Raft) listenHearbeat() {
 	timeoutTimer := time.NewTimer(rf.timeoutDuration)
 
 	for {
+		if !rf.isAlive {
+			return
+		}
 		select {
 		case hb := <-rf.heartbeatCh:
 
 			if rf.role == Candidate {
-				fmt.Printf("Follower %d has stepped down from candidature. \n", rf.me)
+				if rf.isAlive {
+					fmt.Printf("Follower %d has stepped down from candidature. \n", rf.me)
+				}
 
 				rf.role = Follower
 				rf.votedFor = -1
@@ -405,7 +439,9 @@ func (rf *Raft) listenHearbeat() {
 		case <-timeoutTimer.C:
 
 			if rf.role != Leader { // Election timeout elapsed, trigger election
-				fmt.Printf("Follower %d has timeout'ed, send help. \n", rf.me)
+				if rf.isAlive {
+					fmt.Printf("Follower %d has timeout'ed during term %d, send help. \n", rf.me, rf.currentTerm)
+				}
 				// server int, args *RequestVoteArgs, reply *RequestVoteReply
 
 				rf.startElection()
@@ -434,8 +470,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 
+	rf.isAlive = true
+	rf.debugId = rand.Float64() * 100
+
 	// Your initialization code here (2A, 2B, 2C).
 	rf.leaderIndex = -1
+
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.votesReceived = 0
@@ -448,7 +488,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.role = Follower
 
-	rf.heartbeatCh = make(chan AppendEntriesArgs)
+	rf.heartbeatCh = make(chan *AppendEntriesArgs)
 
 	go rf.listenHearbeat()
 	// initialize from state persisted before a crash
