@@ -181,7 +181,7 @@ func (rf *Raft) RequestVote(candidateArgs *RequestVoteArgs, reply *RequestVoteRe
 	// Example logic:
 	// 1. Check if the candidate's term is greater than the current term.
 	newerTerm := false
-	if candidateArgs.Term >= rf.currentTerm {
+	if candidateArgs.Term > rf.currentTerm {
 		newerTerm = true
 		rf.currentTerm = candidateArgs.Term
 		rf.votedFor = -1
@@ -346,7 +346,7 @@ func (rf *Raft) startHearbeatRoutine() {
 		hbArgs.Term = rf.currentTerm
 		hbArgs.LeaderID = rf.me
 
-		fmt.Printf("PID %f\n", rf.debugId)
+		fmt.Printf("Server %d [PID %f]\n", rf.me, rf.debugId)
 
 		//Broadcast heartbeat para todos os servidores
 		for id := 0; id < len(rf.peers); id++ {
@@ -365,8 +365,13 @@ func (rf *Raft) startHearbeatRoutine() {
 
 					if !hbReply.Success {
 
-						rf.role = Follower
+						rf.mu.Lock()
 
+						// Atualizando termo na resposta negativa e saindo de lider
+						rf.role = Follower
+						rf.currentTerm = hbReply.Term
+
+						rf.mu.Unlock()
 					}
 				}
 			}(id)
@@ -470,6 +475,8 @@ func (rf *Raft) listenHearbeat() {
 		select {
 		case hb := <-rf.heartbeatCh:
 
+			rf.mu.Lock()
+
 			if rf.role == Candidate {
 				if rf.isAlive {
 					fmt.Printf("Follower %d has stepped down from candidature. \n", rf.me)
@@ -485,11 +492,13 @@ func (rf *Raft) listenHearbeat() {
 			timeoutTimer.Reset(rf.timeoutDuration)
 			rf.timeoutDuration = time.Duration(rand.Intn(rf.maxTime-rf.minTime+1)+rf.minTime) * time.Millisecond
 
+			rf.mu.Unlock()
 		case <-timeoutTimer.C:
 
 			if rf.role != Leader { // Election timeout elapsed, trigger election
 				if rf.isAlive {
-					fmt.Printf("Follower %d has timeout'ed during term %d, send help. \n", rf.me, rf.currentTerm)
+					fmt.Printf("Server %d has role = %d\n", rf.me, rf.role)
+					fmt.Printf("Follower %d has timed out during term %d, send help. \n", rf.me, rf.currentTerm)
 				}
 				// server int, args *RequestVoteArgs, reply *RequestVoteReply
 
@@ -498,6 +507,7 @@ func (rf *Raft) listenHearbeat() {
 				rf.timeoutDuration = time.Duration(rand.Intn(rf.maxTime-rf.minTime+1)+rf.minTime) * time.Millisecond
 
 			}
+
 		}
 	}
 }
@@ -521,6 +531,8 @@ func (rf *Raft) listenHearbeat() {
 //	com o enunciado do trabalho.
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
+
+	println(">	Initializing new raft server	<\n")
 
 	rf := &Raft{}
 	rf.peers = peers
