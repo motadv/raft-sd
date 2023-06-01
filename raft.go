@@ -174,6 +174,7 @@ func (rf *Raft) RequestVote(candidateArgs *RequestVoteArgs, reply *RequestVoteRe
 	// Your code here (2A, 2B).
 
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
 	// rf - eleitor || args - candidate
 
@@ -197,16 +198,22 @@ func (rf *Raft) RequestVote(candidateArgs *RequestVoteArgs, reply *RequestVoteRe
 	// 4. Grant the vote to the candidate if all conditions are met.
 	// Fill the reply struct with the appropriate values.
 	if newerTerm && hasntVoted {
+		if rf.isAlive {
+
+			fmt.Printf("Server %d voted for %d\n", rf.me, candidateArgs.CandidateID)
+		}
 		reply.VoteGranted = true
 		rf.votedFor = candidateArgs.CandidateID
 
 	} else {
 		reply.VoteGranted = false
+		if rf.isAlive {
+			fmt.Printf("Server %d rejected vote for %d\n", rf.me, candidateArgs.CandidateID)
+		}
 	}
 
 	reply.Term = rf.currentTerm
 
-	rf.mu.Unlock()
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -247,12 +254,13 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	if ok && rf.role == Candidate {
 		if reply.VoteGranted {
 			rf.votesReceived += 1
 
 			if rf.isAlive {
-				fmt.Printf("Server %d received a vote from %d \n", rf.me, server)
 				fmt.Printf("Server %d now has %d votes out of %d \n", rf.me, rf.votesReceived, len(rf.peers))
 			}
 		}
@@ -269,7 +277,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 			go rf.startHearbeatRoutine()
 		}
 	}
-	rf.mu.Unlock()
 	return ok
 }
 
@@ -286,32 +293,32 @@ func (rf *Raft) AppendEntry(args *AppendEntriesArgs, reply *AppendEntriesReply) 
 	rf.heartbeatCh <- args
 
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
 	reply.Success = true
 
 	if args.Term >= rf.currentTerm {
-		if (rf.isAlive) { fmt.Printf("Server [S%d | T%d] stepped down in place of [S%d | T%d] and updated its Term\n", rf.me, rf.currentTerm, args.LeaderID, args.Term)
-		rf.role = Follower
-		rf.currentTerm = args.Term
-	}
-
-	reply.Term = rf.currentTerm
-	if args.Term < rf.currentTerm {
-		reply.Success = false
-	}
-
-	if reply.Success {
 		if rf.isAlive {
-			fmt.Printf("	Message Received: Server [S%d | T%d] <--- Leader [S%d | T%d] \n", rf.me, rf.currentTerm, args.LeaderID, args.Term)
+			rf.role = Follower
+			rf.currentTerm = args.Term
 		}
-	} else {
-		if rf.isAlive {
-			fmt.Printf("	Server %d has sent a failed message. (Outdated Leader) \n", args.LeaderID)
+
+		reply.Term = rf.currentTerm
+		if args.Term < rf.currentTerm {
+			reply.Success = false
 		}
+
+		if reply.Success {
+			if rf.isAlive {
+				fmt.Printf("	Message Received: Server [S%d | T%d] <--- Leader [S%d | T%d] \n", rf.me, rf.currentTerm, args.LeaderID, args.Term)
+			}
+		} else {
+			if rf.isAlive {
+				fmt.Printf("	Server %d has sent a failed message. (Outdated Leader) \n", args.LeaderID)
+			}
+		}
+
 	}
-
-	rf.mu.Unlock()
-
 }
 
 // startHeartbeatRoutine() -
@@ -355,7 +362,7 @@ func (rf *Raft) startHearbeatRoutine() {
 
 						// Atualizando termo na resposta negativa e saindo de lider
 						if rf.isAlive {
-							fmt.Printf("Server %d: Message received with failed response, stepping down from leadership", rf.me)
+							fmt.Printf("Server %d: Message received with failed response, stepping down from leadership\n", rf.me)
 						}
 						rf.role = Follower
 						rf.currentTerm = hbReply.Term
@@ -366,7 +373,7 @@ func (rf *Raft) startHearbeatRoutine() {
 			}(id)
 		}
 
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(110 * time.Millisecond)
 	}
 
 }
@@ -398,6 +405,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // turn off debug output from this instance.
 func (rf *Raft) Kill() {
 	// Desativando server ao fim do teste
+	fmt.Printf("Server %d was killed!\n", rf.me)
 	rf.isAlive = false
 }
 
@@ -410,11 +418,14 @@ func (rf *Raft) Kill() {
 func (rf *Raft) startElection() {
 
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
-	fmt.Printf("Starting new election: [S%d | T%d] is trying to become a leader of term %d. \n", rf.me, rf.currentTerm, rf.currentTerm+1)
+	if rf.isAlive {
+		fmt.Printf("Starting new election: [S%d | T%d] is trying to become a leader of term %d. \n", rf.me, rf.currentTerm, rf.currentTerm+1)
+	}
 
 	rf.role = Candidate
-	rf.currentTerm = rf.currentTerm + 1 	//Current term increments on start of election
+	rf.currentTerm = rf.currentTerm + 1 //Current term increments on start of election
 	rf.votedFor = rf.me
 	rf.votesReceived = 1
 
@@ -431,13 +442,14 @@ func (rf *Raft) startElection() {
 			//Skip itself
 			continue
 		}
-		fmt.Printf("Candidate [S%d | T%d] is aking %d's vote.\n", rf.me, rf.currentTerm, id)
+		if rf.isAlive {
+			fmt.Printf("	Candidate [S%d | T%d] is asking %d's vote.\n", rf.me, rf.currentTerm, id)
+		}
 
 		requestVotesReply := RequestVoteReply{}
 		go rf.sendRequestVote(id, &requestVotesArgs, &requestVotesReply)
 	}
 
-	rf.mu.Unlock()
 }
 
 // listenHeartBeat() -
@@ -477,7 +489,9 @@ func (rf *Raft) listenHearbeat() {
 		case <-timeoutTimer.C:
 
 			if rf.role != Leader { // Election timeout elapsed, trigger election
-				fmt.Printf("Follower %d has timed out during term %d. \n", rf.me, rf.currentTerm)
+				if rf.isAlive {
+					fmt.Printf("Follower %d has timed out during term %d. \n", rf.me, rf.currentTerm)
+				}
 
 				rf.startElection()
 				timeoutTimer.Reset(rf.timeoutDuration)
@@ -507,12 +521,12 @@ func (rf *Raft) listenHearbeat() {
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 
-	rf.me = me
-	println(">	Initializing new raft server %d	<\n", rf.me)
+	fmt.Printf(">	Initializing new raft server %d	<\n", me)
 
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
+	rf.me = me
 
 	rf.isAlive = true
 	rf.debugId = rand.Float64() * 100
