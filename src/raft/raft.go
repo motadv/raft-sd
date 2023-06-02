@@ -1,5 +1,7 @@
 package raft
 
+// Código desenvolvido por Bruna Guerreiro, Rodrigo Mota e Pedro Lanzarini
+
 //
 // this is an outline of the API that raft must expose to
 // the service (or tester). see comments below for
